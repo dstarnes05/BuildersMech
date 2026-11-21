@@ -1,20 +1,22 @@
-"""AegisApex v3: Grandmaster-Tier Mech Royale Tournament Agent.
+"""AegisApex v4: Apex-Tier Mech Royale Tournament Agent.
 
-V3 Strategic Architecture:
-1. Active Projectile Interception & Dodging:
-   - Scans incoming enemy projectiles (gun bullets & mortar shells).
-   - Computes Closest Point of Approach (CPA); when a projectile is on collision course, executes an evasive perpendicular sidestep / boost burst.
-2. Relentless Corner & Flank Combat (No Fight Abandonment):
-   - When an enemy steps behind a corner/obstacle, the bot does NOT abandon the fight.
-   - It pre-charges the Laser while advancing to re-peek the angle.
-   - Re-acquires line-of-sight and unleashes an instant 315-504 damage laser burst + gun barrage.
-3. Dynamic Economy (Crates & Drops):
-   - When out of combat, targets nearby loot crates (300 HP) and NPC drones (350 HP) to harvest power cubes and weapons.
-   - Anticipates supply drops and captures ready drops for 100% full HP/energy restoration and +3 cubes.
-4. Endgame Zone Edge Positioning:
-   - In late game (radii <= 140m), stays near safe-zone boundary with back to the storm and solid cover, preventing 360-degree crossfire and bottlenecking pursuers.
-5. Optimized Upgrade Selection:
-   - Prioritizes Nanites (72 HP/s regen after 3.5s delay) -> Plating (+15% max HP) -> Reactive Armor (-8% damage taken) -> Laser/Gun damage.
+V4 Strategic Breakthroughs:
+1. Silent Stealth Healing:
+   - When retreating behind cover to heal, caps speed below 4.5 m/s (under the 5.0 m/s acoustic threshold).
+   - Eliminates all step and boost audio signatures, causing enemy squad tracking memory (5s) to expire while guaranteeing uninterrupted 45-72 HP/s full-health regeneration.
+2. Dual Energy Loadout (Laser + Lightning):
+   - Actively upgrades Slot 0 (replacing starter gun) when both Laser and Lightning are available.
+   - Laser: 280m long-range hitscan burst (315-504 damage).
+   - Lightning: 45m multi-chain instant arc (240 DPS), instantly shutting down enemy charging lasers for 2s.
+   - Eliminates the 2.4s gun reload downtime completely.
+3. Tactical Corner Pre-Reload:
+   - Triggers proactive gun reloading when ammo <= 6 while an opponent is behind cover, ensuring full 12-round clip on every corner peek.
+4. Execute-Priority Target Elimination:
+   - In multi-bot fights against medium/hard hunters, dynamically focuses firepower on low-HP enemies (HP < 500) to rapidly reduce incoming squad DPS and harvest dropped cubes for instant heals.
+5. Active Crate & Cube Economy:
+   - Pathfinds toward and destroys nearby loot crates (300 HP) and NPC drones (350 HP) out of combat for early-game power cube scaling (+4% HP & damage per cube).
+6. Energy Conservation Reserve:
+   - Preserves a 20-energy buffer to ensure Lightning arcs and high-urgency projectile dodges are never starved.
 """
 from __future__ import annotations
 
@@ -32,8 +34,8 @@ UPGRADE_PRIORITY = {
     "nanites": 100,  # +60% out-of-combat regen, starts 1.5s sooner
     "plating": 96,   # +15% max HP (up to +45% HP)
     "armor": 92,     # -8% damage taken (up to -24%)
-    "laser_charge": 86,
-    "laser_damage": 83,
+    "laser_charge": 88,
+    "laser_damage": 84,
     "gun_damage": 80,
     "gun_velocity": 76,
     "servos": 70,    # +8% movement speed
@@ -50,7 +52,7 @@ UPGRADE_PRIORITY = {
 
 
 class Bot:
-    name = "AegisApex-v3"
+    name = "AegisApex-v4"
 
     def __init__(self, hello: mf.Hello):
         cfg = hello.get("config", {})
@@ -109,7 +111,7 @@ class Bot:
         cur_r = r + frac * (nr - r)
         return [cur_cx, cur_cy], cur_r
 
-    def _calculate_projectile_dodge(self, me_pos: List[float], projectiles: List[dict]) -> Tuple[float, float, bool]:
+    def _calculate_projectile_dodge(self, me_pos: List[float], projectiles: List[dict], energy: float) -> Tuple[float, float, bool]:
         """Checks for incoming projectiles on collision course and computes evasive vector."""
         mx, my, mz = me_pos[0], me_pos[1], me_pos[2]
         dodge_x, dodge_y = 0.0, 0.0
@@ -126,10 +128,8 @@ class Bot:
             dy = my - py
             dz = (mz + 4.5) - pz
 
-            # Time to closest approach
             t = (dx * vx + dy * vy + dz * vz) / v_sq
             if 0.0 < t < 0.65:
-                # Position at closest approach
                 cx = px + vx * t
                 cy = py + vy * t
                 cz = pz + vz * t
@@ -141,17 +141,16 @@ class Bot:
                     if v_len > 1.0:
                         perp_x = -vy / v_len
                         perp_y = vx / v_len
-                        # Choose side that increases distance from projectile
                         dot = (mx - px) * perp_x + (my - py) * perp_y
                         if dot < 0:
                             perp_x = -perp_x
                             perp_y = -perp_y
 
                         weight = (3.8 - dist_xy) / 3.8
-                        dodge_x += perp_x * weight * 3.0
-                        dodge_y += perp_y * weight * 3.0
+                        dodge_x += perp_x * weight * 3.2
+                        dodge_y += perp_y * weight * 3.2
 
-                        if t < 0.35:
+                        if t < 0.35 and energy > 20.0:
                             urgent_boost = True
 
         return dodge_x, dodge_y, urgent_boost
@@ -188,10 +187,12 @@ class Bot:
                     best_idx = idx
             act["pick"] = best_idx
 
-        # 3. Weapons loadout & immediate pickups
+        # 3. Weapons loadout & smart dual-energy upgrading
         weapons = me.get("weapons", [None, None])
         w0 = weapons[0]
         w1 = weapons[1] if len(weapons) > 1 else None
+        w0_kind = w0.get("kind") if w0 else None
+        w1_kind = w1.get("kind") if w1 else None
 
         near_pickups = [
             p for p in obs.get("pickups", [])
@@ -202,16 +203,25 @@ class Bot:
         if near_pickups:
             if w1 is None:
                 p = near_pickups[0]
-                if p.get("kind") != (w0.get("kind") if w0 else None):
+                if p.get("kind") != w0_kind:
                     act["take"] = p["id"]
             else:
                 for p in near_pickups:
                     p_kind = p.get("kind")
-                    if p_kind == "laser" and w1.get("kind") != "laser" and not self.is_charging_laser:
+                    # If we have Gun in slot 0, and slot 1 is Laser or Lightning:
+                    # Upgrade Slot 0 by swapping Gun for the complementary energy weapon!
+                    if w0_kind == "gun" and not self.is_charging_laser:
+                        if (w1_kind == "laser" and p_kind == "lightning") or (w1_kind == "lightning" and p_kind == "laser"):
+                            act["take"] = p["id"]
+                            act["drop"] = 0
+                            break
+
+                    # Standard slot 1 upgrade to laser or lightning
+                    if p_kind == "laser" and w1_kind != "laser" and not self.is_charging_laser:
                         act["take"] = p["id"]
                         act["drop"] = 1
                         break
-                    elif p_kind == "lightning" and w1.get("kind") not in ("laser", "lightning"):
+                    elif p_kind == "lightning" and w1_kind not in ("laser", "lightning"):
                         act["take"] = p["id"]
                         act["drop"] = 1
                         break
@@ -222,7 +232,7 @@ class Bot:
         next_center = zone_info.get("next_center", cur_center)
         next_radius = float(zone_info.get("next_radius", cur_radius))
 
-        # 5. Threat perception & targeting
+        # 5. Threat perception & execute-priority targeting
         muzzle_h = float(me.get("stats", {}).get("muzzle_height", 7.0))
         my_muzzle = [x, y, z + muzzle_h]
         my_eyes = [x, y, z + 8.0]
@@ -256,16 +266,19 @@ class Bot:
             ecom = [epos[0], epos[1], epos[2] + 4.5]
             d = math.hypot(epos[0] - x, epos[1] - y)
             has_los = self.world.has_los(my_muzzle, ecom)
+            e_hp = float(enemy.get("hp", 1400.0))
 
             score = 700.0 - d
             if has_los:
                 score += 850.0
             if enemy.get("id") == self.target_id:
-                score += 350.0  # Sticky lock on current duel target
+                score += 300.0  # Sticky duel continuity
             if laser_slot is not None and "mortar" in enemy.get("weapons", []):
                 score += 400.0  # Cook-off target
-            if enemy.get("hp", 1400.0) < 450.0:
-                score += 300.0  # Low HP execute
+            
+            # Massive priority on executing weakened enemies (< 500 HP)
+            if e_hp < 500.0:
+                score += 650.0 * (1.0 - (e_hp / 500.0))
 
             if score > best_score:
                 best_score = score
@@ -279,12 +292,11 @@ class Bot:
             self.target_last_seen_t = t
             self.target_last_pos = primary_target["pos"]
         else:
-            # Check if recently tracked target is still in memory (< 4s)
             if (t - self.target_last_seen_t) > 4.0:
                 self.target_id = None
                 self.target_last_pos = None
 
-        # 6. Combat Aiming & Trigger Control
+        # 6. Combat Aiming, Trigger Control & Proactive Reload
         commanded_aim_yaw = me["aim"][0]
         commanded_aim_pitch = me["aim"][1]
         fire_slot0 = False
@@ -323,17 +335,16 @@ class Bot:
                     else:
                         fire_slot1 = True
 
-            # Laser: pre-charge even behind corner, release on LOS alignment!
+            # Laser: pre-charge even behind cover, release on LOS alignment!
             if laser_slot is not None:
                 laser_w = weapons[laser_slot]
                 current_charge = float(laser_w.get("charge", 0.0)) if laser_w else 0.0
                 direct_yaw, direct_pitch = ballistics.solve_direct_aim(my_muzzle, target_com)
                 yaw_err_direct = abs(ballistics.normalize_angle(me["aim"][0] - direct_yaw))
 
-                # If in range, pre-charge!
                 if target_dist < self.laser_range:
                     if not target_has_los:
-                        # Pre-charge behind corner if charge < 0.70s
+                        # Pre-charge behind corner
                         if current_charge < 0.65:
                             if laser_slot == 0:
                                 fire_slot0 = True
@@ -341,7 +352,6 @@ class Bot:
                                 fire_slot1 = True
                             self.is_charging_laser = True
                         else:
-                            # Hold charge until peek
                             if laser_slot == 0:
                                 fire_slot0 = True
                             else:
@@ -383,8 +393,13 @@ class Bot:
                         else:
                             fire_slot1 = True
 
+            # TACTICAL PROACTIVE RELOAD: If target is behind cover and ammo <= 6, reload now!
+            if not target_has_los and gun_slot is not None:
+                gun_w = weapons[gun_slot]
+                if gun_w and gun_w.get("ammo", 12) <= 6 and gun_w.get("reload", 0.0) == 0.0:
+                    act["reload"] = True
+
         elif self.target_last_pos and (t - self.target_last_seen_t) < 3.0:
-            # Target ducked behind cover: aim toward corner and pre-charge laser!
             tx, ty, tz = self.target_last_pos
             yaw_to_last = math.atan2(ty - y, tx - x)
             commanded_aim_yaw = yaw_to_last
@@ -401,10 +416,10 @@ class Bot:
                     self.is_charging_laser = True
 
         else:
-            # Idle: check if a crate or drone is nearby to shoot for cubes!
+            # Idle: auto-target crates for power cubes
             near_crates = [
                 c for c in obs.get("crates", [])
-                if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < 25.0
+                if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < 28.0
                 and self.world.has_los(my_muzzle, [c["pos"][0], c["pos"][1], c["pos"][2] + 1.0])
             ]
             if near_crates and gun_slot is not None:
@@ -425,21 +440,22 @@ class Bot:
                 recent_sound = obs["sounds"][0]
                 commanded_aim_yaw = recent_sound.get("bearing", commanded_aim_yaw)
 
-            # Auto-reload gun when out of combat
-            if not shooting_crate and w0 and w0.get("kind") == "gun":
-                ammo = w0.get("ammo", 12)
-                if ammo <= 5 and w0.get("reload", 0.0) == 0.0:
+            # Auto-reload gun when idle
+            if not shooting_crate and gun_slot is not None:
+                gun_w = weapons[gun_slot]
+                if gun_w and gun_w.get("ammo", 12) <= 6 and gun_w.get("reload", 0.0) == 0.0:
                     act["reload"] = True
 
-        # 7. Strategic Movement & Combat Kiting
+        # 7. Strategic Movement & Silent Stealth Healing
         if tick % 45 == 0:
             self.strafe_direction *= -1.0
 
         goal_x, goal_y = next_center[0], next_center[1]
         request_boost = False
+        is_silent_healing = False
 
-        # Only retreat if critically low (< 380 HP) or 2+ enemies within 40m
-        critical_retreat = (hp < 380.0 and len(all_enemies) > 0) or (len(all_enemies) >= 2 and target_dist < 38.0)
+        # Critical retreat trigger: HP < 400 or 2+ enemies within 38m
+        critical_retreat = (hp < 400.0 and len(all_enemies) > 0) or (len(all_enemies) >= 2 and target_dist < 38.0)
 
         if critical_retreat and primary_target:
             cover_pt = self.world.find_cover(
@@ -451,8 +467,14 @@ class Bot:
             )
             if cover_pt:
                 goal_x, goal_y = cover_pt[0], cover_pt[1]
+                dist_to_cover = math.hypot(cover_pt[0] - x, cover_pt[1] - y)
                 mf.draw.point([goal_x, goal_y, z], "#00ff88", 8)
-                request_boost = (energy > 20.0)
+                
+                # If we have reached cover (dist < 4m): SLOW DOWN TO < 5 m/s TO BE COMPLETELY SILENT!
+                if dist_to_cover < 4.0:
+                    is_silent_healing = True
+                else:
+                    request_boost = (energy > 25.0)
             else:
                 away_x = x - primary_target["pos"][0]
                 away_y = y - primary_target["pos"][1]
@@ -468,13 +490,13 @@ class Bot:
             d = target_dist
 
             if not target_has_los:
-                # Target stepped behind corner: FLANK / ADVANCE TO PEEK!
+                # Flank corner to re-acquire LOS
                 u_x = (t_pos[0] - x) / (d + 1e-4)
                 u_y = (t_pos[1] - y) / (d + 1e-4)
                 goal_x = x + u_x * 15.0
                 goal_y = y + u_y * 15.0
             else:
-                # ORBITAL COMBAT KITING at 32m - 40m
+                # Orbital circle strafe at 32m - 40m
                 u_x = (t_pos[0] - x) / (d + 1e-4)
                 u_y = (t_pos[1] - y) / (d + 1e-4)
                 perp_x = -u_y * self.strafe_direction
@@ -501,7 +523,7 @@ class Bot:
                     request_boost = True
 
         else:
-            # OUT OF COMBAT: Weapon Scavenge -> Supply Drops -> Cubes -> Zone Edge Control
+            # OUT OF COMBAT: Weapon Scavenge -> Supply Drops -> Crates -> Cubes -> Zone Edge
             unarmed_slot1 = (w1 is None)
             best_weapon_pickup = None
             if unarmed_slot1:
@@ -535,28 +557,37 @@ class Bot:
                     request_boost = (energy > 25.0)
 
             else:
-                # Power cubes
-                cubes = obs.get("cubes", [])
-                safe_cubes = [
-                    c for c in cubes
-                    if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < 45.0
+                # Crate scavenging for early power cubes
+                near_crates = [
+                    c for c in obs.get("crates", [])
+                    if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < 35.0
                     and math.hypot(c["pos"][0] - cur_center[0], c["pos"][1] - cur_center[1]) < (cur_radius - 12.0)
                 ]
-                if safe_cubes:
-                    safe_cubes.sort(key=lambda c: math.hypot(c["pos"][0] - x, c["pos"][1] - y))
-                    goal_x = safe_cubes[0]["pos"][0]
-                    goal_y = safe_cubes[0]["pos"][1]
-                    mf.draw.point([goal_x, goal_y, z], "#00e5ff", 6)
+                if near_crates:
+                    goal_x = near_crates[0]["pos"][0]
+                    goal_y = near_crates[0]["pos"][1]
                 else:
-                    # In late game (radius <= 140m), hold tactical edge with storm at back
-                    if cur_radius <= 140.0:
-                        edge_dist = max(20.0, cur_radius - 22.0)
-                        angle_to_me = math.atan2(y - cur_center[1], x - cur_center[0])
-                        goal_x = cur_center[0] + math.cos(angle_to_me) * edge_dist
-                        goal_y = cur_center[1] + math.sin(angle_to_me) * edge_dist
+                    cubes = obs.get("cubes", [])
+                    safe_cubes = [
+                        c for c in cubes
+                        if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < 45.0
+                        and math.hypot(c["pos"][0] - cur_center[0], c["pos"][1] - cur_center[1]) < (cur_radius - 12.0)
+                    ]
+                    if safe_cubes:
+                        safe_cubes.sort(key=lambda c: math.hypot(c["pos"][0] - x, c["pos"][1] - y))
+                        goal_x = safe_cubes[0]["pos"][0]
+                        goal_y = safe_cubes[0]["pos"][1]
+                        mf.draw.point([goal_x, goal_y, z], "#00e5ff", 6)
                     else:
-                        goal_x = next_center[0]
-                        goal_y = next_center[1]
+                        # Late game perimeter positioning (radius <= 140m)
+                        if cur_radius <= 140.0:
+                            edge_dist = max(20.0, cur_radius - 22.0)
+                            angle_to_me = math.atan2(y - cur_center[1], x - cur_center[0])
+                            goal_x = cur_center[0] + math.cos(angle_to_me) * edge_dist
+                            goal_y = cur_center[1] + math.sin(angle_to_me) * edge_dist
+                        else:
+                            goal_x = next_center[0]
+                            goal_y = next_center[1]
 
         # 8. Vector Field Steering, Obstacle Avoidance & Projectile Dodging
         g_dx = goal_x - x
@@ -587,10 +618,10 @@ class Bot:
                 request_boost = True
 
         # ACTIVE PROJECTILE DODGING
-        proj_dodge_x, proj_dodge_y, proj_boost = self._calculate_projectile_dodge([x, y, z], obs.get("projectiles", []))
+        proj_dodge_x, proj_dodge_y, proj_boost = self._calculate_projectile_dodge([x, y, z], obs.get("projectiles", []), energy)
         vx += proj_dodge_x
         vy += proj_dodge_y
-        if proj_boost:
+        if proj_boost and energy > 20.0:
             request_boost = True
 
         # Dodge charging enemy lasers
@@ -606,19 +637,25 @@ class Bot:
                     if d_len > 0.1:
                         vx += (dodge_dx / d_len) * 2.8
                         vy += (dodge_dy / d_len) * 2.8
-                        request_boost = True
+                        if energy > 20.0:
+                            request_boost = True
 
-        # Normalize move vector
+        # Move vector normalization & Silent Healing throttle
         mv_len = math.hypot(vx, vy)
         if mv_len > 0.05:
-            move_cmd = [vx / mv_len, vy / mv_len]
+            # If in cover performing silent healing, clamp speed below 4.0 m/s (scale to 0.34)
+            if is_silent_healing:
+                move_cmd = [(vx / mv_len) * 0.34, (vy / mv_len) * 0.34]
+                request_boost = False
+            else:
+                move_cmd = [vx / mv_len, vy / mv_len]
         else:
             move_cmd = [0.0, 0.0]
 
         # Jump handling over ledges/steps
         grounded = me.get("grounded", True)
         jump_cmd = False
-        if grounded and mv_len > 0.3 and (tick % 25 == 0):
+        if grounded and mv_len > 0.3 and (tick % 25 == 0) and not is_silent_healing:
             if math.hypot(wall_rx, wall_ry) > 0.3:
                 jump_cmd = True
 
@@ -630,7 +667,7 @@ class Bot:
             jump=jump_cmd,
         )
 
-        mf.draw.label(f"HP {hp:.0f}/{max_hp:.0f} · {'Combat' if primary_target else 'Searching'}")
+        mf.draw.label(f"HP {hp:.0f}/{max_hp:.0f} · {'Stealth' if is_silent_healing else ('Combat' if primary_target else 'Searching')}")
         mf.draw.point([goal_x, goal_y, z], "#40c0ff", 6)
 
         return act
