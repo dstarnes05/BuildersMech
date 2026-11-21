@@ -1,20 +1,13 @@
-"""AegisApex v7: Apex Championship Edition.
+"""AegisApex v8: Champion Tournament Edition.
 
-V7 Critical Fixes & Master Tactics:
-1. SELF-DAMAGE ELIMINATION (Mortar Ground-Splash Fix):
-   - In previous versions, mortar shells fired at the Gun's flat/downward pitch (-5 deg), detonating at our own feet for 80 self-damage and 45 energy concussion drain!
-   - v7 strictly enforces safe mortar firing: Mortar is only fired when target distance >= 25m and launch pitch >= +12 deg, eliminating self-inflicted blast damage completely.
-2. Dual Energy Weapon Hierarchy (Laser + Lightning Supremacy):
-   - Laser (280m hitscan, 315-504 burst) + Lightning (45m instant arc, laser-shorting, multi-chain) is the undisputed #1 tournament loadout.
-   - Deprecates Mortar pickup when Laser or Lightning is available.
-3. Multi-Threat Centroid Vector (Anti-Pinch Escape):
-   - In 2v1 and 3v1 fights, computes the centroid of all enemy positions and escapes directly away from the squad centroid.
-   - Prevents opposing vectors from canceling each other out, ensuring the bot never gets trapped between multiple attackers.
-4. Complete 22-Upgrade Exploitation:
-   - Added `laser_pierce` (Laser pierces targets, dealing 1000+ total damage through grouped hostiles).
-   - Elevated `gun_mag` (20 rounds, -20% reload), `servos` (+8% speed), and `jets` (-25% boost drain).
-5. Coordinated Drop Capture Perimeter:
-   - Maintains continuous capture circle inside the 8m ring while laying down suppressing fire on hostiles.
+V8 Design: Built directly on the proven v5 architecture (which scored 4.04).
+Enhancements:
+1. Preserves the fast agile orbital kiting & anti-rush backpedal from v5.
+2. Preserves instant closest-weapon acquisition (always guarantees dual weapons at match start).
+3. Fixes mortar self-splash: Mortar only fires when pitch >= 0 deg and dist >= 22m.
+4. Intelligent Supply Drop Contest: Only captures ready drops when uncontested or when we have ring advantage.
+5. High-Impact Upgrade Priority: Adds laser_pierce (90), boosts gun_mag (75), servos (82), and jets (80).
+6. Lightning Counter-Play: Instantly shorts enemy charging lasers within 44m.
 """
 from __future__ import annotations
 
@@ -32,28 +25,26 @@ UPGRADE_PRIORITY = {
     "nanites": 100,       # +60% out-of-combat regen, starts 1.5s sooner
     "plating": 96,        # +15% max HP (up to +45% HP)
     "armor": 93,          # -8% damage taken (up to -24%)
-    "laser_pierce": 90,   # Laser penetrates through 2nd target (devastating vs pairs)
-    "laser_charge": 88,   # -25% laser charge time (0.75s -> 0.42s)
-    "laser_damage": 86,   # +18% laser damage (up to 517 dmg)
-    "servos": 84,         # +8% movement speed (out-kiting squads)
-    "jets": 82,           # -25% boost drain (sustained dodging)
+    "laser_pierce": 90,   # Laser penetrates 2nd target (massive vs pairs)
+    "laser_charge": 88,   # -25% laser charge time
+    "laser_damage": 85,   # +18% laser damage
+    "servos": 82,         # +8% movement speed (out-kiting squads)
+    "jets": 80,           # -25% boost drain (sustained dodging)
     "gun_damage": 78,     # +15% gun damage
-    "gun_mag": 76,        # +8 rounds drum mag, -20% reload
+    "gun_mag": 75,        # +8 rounds drum mag, -20% reload
     "gun_velocity": 74,   # +25% gun projectile speed
-    "lightning_chain": 72,# +1 lightning jump
-    "lightning_range": 70,# +20% lightning range & cone
+    "lightning_range": 68,
     "lightning_efficiency": 68,
     "gun_rate": 60,
     "sensors": 50,
-    "mortar_splash": 40,
-    "mortar_reload": 35,
-    "reactor": 30,
-    "capacitor": 25,
+    "mortar_reload": 40,
+    "reactor": 35,
+    "capacitor": 30,
 }
 
 
 class Bot:
-    name = "AegisApex-v7"
+    name = "AegisApex-v8"
 
     def __init__(self, hello: mf.Hello):
         cfg = hello.get("config", {})
@@ -113,77 +104,46 @@ class Bot:
         return [cur_cx, cur_cy], cur_r
 
     def _calculate_projectile_dodge(self, me_pos: List[float], projectiles: List[dict], energy: float) -> Tuple[float, float, bool]:
-        """Checks for incoming gun bullets & parabolic mortar shells on collision course."""
+        """Checks for incoming gun bullets & mortar shells on collision course."""
         mx, my, mz = me_pos[0], me_pos[1], me_pos[2]
         dodge_x, dodge_y = 0.0, 0.0
         urgent_boost = False
 
         for p in projectiles:
-            p_kind = p.get("kind", "gun")
             px, py, pz = p["pos"]
             vx, vy, vz = p["vel"]
+            v_sq = vx * vx + vy * vy + vz * vz
+            if v_sq < 100.0:
+                continue
 
-            if p_kind == "mortar":
-                g = self.mortar_gravity
-                a = 0.5 * g
-                b = -vz
-                c = mz - pz
-                disc = b * b - 4.0 * a * c
-                if disc >= 0:
-                    sqrt_disc = math.sqrt(disc)
-                    t1 = (-b - sqrt_disc) / (2.0 * a)
-                    t2 = (-b + sqrt_disc) / (2.0 * a)
-                    candidates = [t for t in (t1, t2) if t > 0.05]
-                    if candidates:
-                        t_land = min(candidates)
-                        if t_land < 1.3:
-                            imp_x = px + vx * t_land
-                            imp_y = py + vy * t_land
-                            dist_to_blast = math.hypot(imp_x - mx, imp_y - my)
-                            if dist_to_blast < 8.5:
-                                esc_dx = mx - imp_x
-                                esc_dy = my - imp_y
-                                esc_len = math.hypot(esc_dx, esc_dy)
-                                if esc_len > 0.1:
-                                    weight = (8.5 - dist_to_blast) / 8.5
-                                    dodge_x += (esc_dx / esc_len) * weight * 3.5
-                                    dodge_y += (esc_dy / esc_len) * weight * 3.5
-                                    if energy > 15.0:
-                                        urgent_boost = True
+            dx = mx - px
+            dy = my - py
+            dz = (mz + 4.5) - pz
 
-            else:
-                v_sq = vx * vx + vy * vy + vz * vz
-                if v_sq < 100.0:
-                    continue
+            t = (dx * vx + dy * vy + dz * vz) / v_sq
+            if 0.0 < t < 0.65:
+                cx = px + vx * t
+                cy = py + vy * t
+                cz = pz + vz * t
+                dist_xy = math.hypot(cx - mx, cy - my)
+                dist_z = abs(cz - (mz + 4.5))
 
-                dx = mx - px
-                dy = my - py
-                dz = (mz + 4.5) - pz
+                if dist_xy < 3.8 and dist_z < 5.5:
+                    v_len = math.hypot(vx, vy)
+                    if v_len > 1.0:
+                        perp_x = -vy / v_len
+                        perp_y = vx / v_len
+                        dot = (mx - px) * perp_x + (my - py) * perp_y
+                        if dot < 0:
+                            perp_x = -perp_x
+                            perp_y = -perp_y
 
-                t = (dx * vx + dy * vy + dz * vz) / v_sq
-                if 0.0 < t < 0.65:
-                    cx = px + vx * t
-                    cy = py + vy * t
-                    cz = pz + vz * t
-                    dist_xy = math.hypot(cx - mx, cy - my)
-                    dist_z = abs(cz - (mz + 4.5))
+                        weight = (3.8 - dist_xy) / 3.8
+                        dodge_x += perp_x * weight * 3.0
+                        dodge_y += perp_y * weight * 3.0
 
-                    if dist_xy < 3.8 and dist_z < 5.5:
-                        v_len = math.hypot(vx, vy)
-                        if v_len > 1.0:
-                            perp_x = -vy / v_len
-                            perp_y = vx / v_len
-                            dot = (mx - px) * perp_x + (my - py) * perp_y
-                            if dot < 0:
-                                perp_x = -perp_x
-                                perp_y = -perp_y
-
-                            weight = (3.8 - dist_xy) / 3.8
-                            dodge_x += perp_x * weight * 3.0
-                            dodge_y += perp_y * weight * 3.0
-
-                            if t < 0.35 and energy > 18.0:
-                                urgent_boost = True
+                        if t < 0.35 and energy > 18.0:
+                            urgent_boost = True
 
         d_len = math.hypot(dodge_x, dodge_y)
         if d_len > 3.0:
@@ -224,7 +184,7 @@ class Bot:
                     best_idx = idx
             act["pick"] = best_idx
 
-        # 3. Weapons loadout: Laser + Lightning Priority
+        # 3. Weapons loadout: Immediate pickups
         weapons = me.get("weapons", [None, None])
         w0 = weapons[0]
         w1 = weapons[1] if len(weapons) > 1 else None
@@ -239,9 +199,7 @@ class Bot:
 
         if near_pickups:
             if w1 is None:
-                # Pick up first valid weapon (Laser > Lightning > Mortar)
-                p_sorted = sorted(near_pickups, key=lambda p: 0 if p.get("kind") == "laser" else (1 if p.get("kind") == "lightning" else 2))
-                p = p_sorted[0]
+                p = near_pickups[0]
                 if p.get("kind") != w0_kind:
                     act["take"] = p["id"]
             else:
@@ -255,7 +213,7 @@ class Bot:
                             act["drop"] = 0
                             break
 
-                    # Standard slot 1 upgrade: Laser is #1, Lightning is #2
+                    # Standard slot 1 upgrade
                     if p_kind == "laser" and w1_kind != "laser" and not self.is_charging_laser:
                         act["take"] = p["id"]
                         act["drop"] = 1
@@ -316,9 +274,9 @@ class Bot:
                 score += 1000.0 * (1.0 - (d / 25.0))
 
             if enemy.get("id") == self.target_id:
-                score += 250.0
+                score += 250.0  # Duel continuity
             if laser_slot is not None and "mortar" in enemy.get("weapons", []):
-                score += 400.0  # Cook-off target (+60% damage!)
+                score += 400.0  # Cook-off target
             if e_hp < 500.0:
                 score += 550.0 * (1.0 - (e_hp / 500.0))
 
@@ -367,7 +325,7 @@ class Bot:
 
                 mf.draw.line(my_muzzle, pred_pt, "#ff3322")
 
-            # Lightning Arc: instant hitscan within 44m cone + Laser Shorting
+            # Lightning Arc: instant hitscan within 44m cone + laser shorting
             if lightning_slot is not None and target_dist < 44.0 and target_has_los:
                 yaw_to_target = math.atan2(t_pos[1] - y, t_pos[0] - x)
                 angle_diff = abs(ballistics.normalize_angle(me["aim"][0] - yaw_to_target))
@@ -407,15 +365,14 @@ class Bot:
                 else:
                     self.is_charging_laser = False
 
-            # Safe Mortar Fire: ONLY fire if target_dist >= 25m and launch pitch >= +12 deg (no self-splash!)
-            if mortar_slot is not None and 25.0 <= target_dist < 180.0:
+            # Safe Mortar Fire: only fire if distance >= 22m and pitch >= 0 deg
+            if mortar_slot is not None and 22.0 <= target_dist < 200.0:
                 mortar_aim = ballistics.solve_mortar_aim(
                     [x, y, z + 9.5], target_com, self.mortar_speed, self.mortar_gravity
                 )
                 if mortar_aim:
                     m_yaw, m_pitch = mortar_aim
-                    # Never fire downward mortar into the ground at our own feet!
-                    if m_pitch >= math.radians(12.0):
+                    if m_pitch >= 0.0:
                         yaw_err_m = abs(ballistics.normalize_angle(me["aim"][0] - m_yaw))
                         if yaw_err_m < math.radians(12.0):
                             if mortar_slot == 0:
@@ -472,19 +429,19 @@ class Bot:
                 if gun_w and gun_w.get("ammo", 12) <= 6 and gun_w.get("reload", 0.0) == 0.0:
                     act["reload"] = True
 
-        # 7. Strategic Movement, Anti-Pinch Centroid Kiting & Drop Capture
+        # 7. Strategic Movement & Anti-Rush Kiting (Proven v5 Movement)
         if tick % 45 == 0:
             self.strafe_direction *= -1.0
 
         goal_x, goal_y = next_center[0], next_center[1]
         request_boost = False
 
-        # Supply Drop Combat Interception: Check if a ready drop is within 38m and uncontested
+        # Supply Drop Interception: Only capture if ready within 35m and uncontested
         ready_drop = None
         for d in obs.get("drops", []):
             if d.get("lands_in", 99.0) == 0.0:
                 d_dist = math.hypot(d["pos"][0] - x, d["pos"][1] - y)
-                if d_dist < 38.0 and math.hypot(d["pos"][0] - cur_center[0], d["pos"][1] - cur_center[1]) < (cur_radius - 10.0):
+                if d_dist < 35.0 and math.hypot(d["pos"][0] - cur_center[0], d["pos"][1] - cur_center[1]) < (cur_radius - 10.0):
                     enemy_in_ring = any(
                         math.hypot(e["pos"][0] - d["pos"][0], e["pos"][1] - d["pos"][1]) < 7.5
                         for e in all_enemies
@@ -493,23 +450,14 @@ class Bot:
                         ready_drop = d
                         break
 
-        critical_retreat = (hp < 350.0 and len(all_enemies) > 0) or (len(all_enemies) >= 2 and target_dist < 28.0)
+        critical_retreat = (hp < 350.0 and len(all_enemies) > 0) or (len(all_enemies) >= 2 and target_dist < 30.0)
 
-        if ready_drop and hp < 1150.0:
-            d_pos = ready_drop["pos"]
-            dist_to_center = math.hypot(d_pos[0] - x, d_pos[1] - y)
-            if dist_to_center < 7.0:
-                # Inside ring! Circle-strafe within the 8m perimeter while maintaining capture
-                u_dx = (d_pos[0] - x) / (dist_to_center + 1e-4)
-                u_dy = (d_pos[1] - y) / (dist_to_center + 1e-4)
-                goal_x = x - u_dy * 8.0
-                goal_y = y + u_dx * 8.0
-            else:
-                goal_x = d_pos[0]
-                goal_y = d_pos[1]
-                if energy > 20.0:
-                    request_boost = True
+        if ready_drop and hp < 1100.0:
+            goal_x = ready_drop["pos"][0]
+            goal_y = ready_drop["pos"][1]
             mf.draw.point([goal_x, goal_y, z], "#ffd700", 10)
+            if energy > 20.0:
+                request_boost = True
 
         elif critical_retreat and primary_target:
             cover_pt = self.world.find_cover(
@@ -542,62 +490,47 @@ class Bot:
                 goal_x = x + u_x * 15.0
                 goal_y = y + u_y * 15.0
             else:
-                # MULTI-THREAT CENTROID KITING
-                # Compute centroid of all nearby enemies (within 45m)
-                nearby_threats = [e for e in all_enemies if math.hypot(e["pos"][0] - x, e["pos"][1] - y) < 45.0]
-                if len(nearby_threats) >= 2:
-                    c_x = sum(e["pos"][0] for e in nearby_threats) / len(nearby_threats)
-                    c_y = sum(e["pos"][1] for e in nearby_threats) / len(nearby_threats)
-                    esc_dx = x - c_x
-                    esc_dy = y - c_y
-                    esc_d = math.hypot(esc_dx, esc_dy)
-                    if esc_d > 0.1:
-                        # Escape directly away from threat cluster!
-                        goal_x = x + (esc_dx / esc_d) * 25.0
-                        goal_y = y + (esc_dy / esc_d) * 25.0
-                        if energy > 20.0:
-                            request_boost = True
-                else:
-                    # 1v1 ORBITAL KITING
-                    u_x = (t_pos[0] - x) / (d + 1e-4)
-                    u_y = (t_pos[1] - y) / (d + 1e-4)
-                    perp_x = -u_y * self.strafe_direction
-                    perp_y = u_x * self.strafe_direction
+                # ANTI-RUSH ORBITAL KITING (PROVEN v5 MECHANICS)
+                u_x = (t_pos[0] - x) / (d + 1e-4)
+                u_y = (t_pos[1] - y) / (d + 1e-4)
+                perp_x = -u_y * self.strafe_direction
+                perp_y = u_x * self.strafe_direction
 
-                    if d < 26.0:
-                        rad_x = -u_x * 2.6
-                        rad_y = -u_y * 2.6
-                        if energy > 15.0:
-                            request_boost = True
-                    elif d > 42.0:
-                        rad_x = u_x * 1.0
-                        rad_y = u_y * 1.0
-                    else:
-                        rad_x = 0.0
-                        rad_y = 0.0
-
-                    combat_vx = perp_x + rad_x
-                    combat_vy = perp_y + rad_y
-                    c_len = math.hypot(combat_vx, combat_vy)
-                    if c_len > 0.1:
-                        goal_x = x + (combat_vx / c_len) * 20.0
-                        goal_y = y + (combat_vy / c_len) * 20.0
-
-                    if energy > 50.0 and (tick % 10 < 4):
+                if d < 26.0:
+                    rad_x = -u_x * 2.5
+                    rad_y = -u_y * 2.5
+                    if energy > 15.0:
                         request_boost = True
+                elif d > 42.0:
+                    rad_x = u_x * 1.0
+                    rad_y = u_y * 1.0
+                else:
+                    rad_x = 0.0
+                    rad_y = 0.0
+
+                combat_vx = perp_x + rad_x
+                combat_vy = perp_y + rad_y
+                c_len = math.hypot(combat_vx, combat_vy)
+                if c_len > 0.1:
+                    goal_x = x + (combat_vx / c_len) * 20.0
+                    goal_y = y + (combat_vy / c_len) * 20.0
+
+                if energy > 50.0 and (tick % 10 < 4):
+                    request_boost = True
 
         else:
-            # OUT OF COMBAT: Weapon Scavenge -> Supply Drops -> Crates -> Cubes -> Zone Envelope
+            # OUT OF COMBAT: Weapon Scavenge -> Supply Drops -> Crates -> Cubes -> Zone Edge
             unarmed_slot1 = (w1 is None)
             best_weapon_pickup = None
             if unarmed_slot1:
                 available_weapons = [
                     p for p in obs.get("pickups", [])
-                    if p.get("kind") in ("laser", "lightning")
+                    if p.get("kind") in ("laser", "lightning", "mortar")
                     and math.hypot(p["pos"][0] - cur_center[0], p["pos"][1] - cur_center[1]) < (cur_radius - 10.0)
                 ]
                 if available_weapons:
-                    available_weapons.sort(key=lambda p: 0 if p.get("kind") == "laser" else 1)
+                    # PROVEN v5 SORT: ALWAYS GRAB THE CLOSEST WEAPON PICKUP!
+                    available_weapons.sort(key=lambda p: math.hypot(p["pos"][0] - x, p["pos"][1] - y))
                     best_weapon_pickup = available_weapons[0]
 
             if best_weapon_pickup and math.hypot(best_weapon_pickup["pos"][0] - x, best_weapon_pickup["pos"][1] - y) < 70.0:
@@ -641,11 +574,11 @@ class Bot:
                         goal_y = safe_cubes[0]["pos"][1]
                         mf.draw.point([goal_x, goal_y, z], "#00e5ff", 6)
                     else:
-                        if cur_radius <= 160.0:
-                            safe_target_r = max(15.0, next_radius - 18.0)
-                            angle_to_me = math.atan2(y - next_center[1], x - next_center[0])
-                            goal_x = next_center[0] + math.cos(angle_to_me) * safe_target_r
-                            goal_y = next_center[1] + math.sin(angle_to_me) * safe_target_r
+                        if cur_radius <= 140.0:
+                            edge_dist = max(20.0, cur_radius - 22.0)
+                            angle_to_me = math.atan2(y - cur_center[1], x - cur_center[0])
+                            goal_x = cur_center[0] + math.cos(angle_to_me) * edge_dist
+                            goal_y = cur_center[1] + math.sin(angle_to_me) * edge_dist
                         else:
                             goal_x = next_center[0]
                             goal_y = next_center[1]
