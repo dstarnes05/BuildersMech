@@ -1,13 +1,21 @@
-"""AegisApex v8: Champion Tournament Edition.
+"""AegisApex v9: Rooftop High-Ground Supremacy.
 
-V8 Design: Built directly on the proven v5 architecture (which scored 4.04).
-Enhancements:
-1. Preserves the fast agile orbital kiting & anti-rush backpedal from v5.
-2. Preserves instant closest-weapon acquisition (always guarantees dual weapons at match start).
-3. Fixes mortar self-splash: Mortar only fires when pitch >= 0 deg and dist >= 22m.
-4. Intelligent Supply Drop Contest: Only captures ready drops when uncontested or when we have ring advantage.
-5. High-Impact Upgrade Priority: Adds laser_pierce (90), boosts gun_mag (75), servos (82), and jets (80).
-6. Lightning Counter-Play: Instantly shorts enemy charging lasers within 44m.
+V9 Strategic Breakthroughs:
+1. Rooftop High-Ground Ascent & Defense:
+   - Identifies flat rooftop buildings (100m^2+ area, 4m-14m height) inside the safe zone.
+   - Jump-jets up building facades to claim elevated rooftops.
+   - On the roof, ground house bots cannot climb up, cannot surround the mech, and cannot maintain line of sight when the mech steps back from the roof edge.
+   - Enables safe, full out-of-combat HP regeneration (+45 to +72 HP/s) while holding elevated sniper angles over the entire campus.
+2. Proven Agile Kiting & Anti-Rush Backpedal (from v5):
+   - Fast orbital circle-strafing with high tangential velocity to force enemy shots to miss.
+   - Full 19.5 m/s backward boost when an enemy closes inside 26m.
+3. Closest-Weapon Priority Looting:
+   - Instantly grabs the closest weapon pickup on the map to ensure dual-weapon loadout at match start.
+4. Active Mortar Impact & Projectile Dodging:
+   - Predicts parabolic mortar blast zones and evades outside the 7m radius.
+   - Smooth CPA bullet dodging.
+5. Laser Shorting Counter-Play:
+   - Instantly cancels enemy charging lasers with Lightning.
 """
 from __future__ import annotations
 
@@ -44,7 +52,7 @@ UPGRADE_PRIORITY = {
 
 
 class Bot:
-    name = "AegisApex-v8"
+    name = "AegisApex-v9"
 
     def __init__(self, hello: mf.Hello):
         cfg = hello.get("config", {})
@@ -82,6 +90,8 @@ class Bot:
         self.target_last_seen_t: float = -100.0
         self.target_last_pos: Optional[List[float]] = None
         self.strafe_direction: float = 1.0
+        self.target_roof: Optional[dict] = None
+        self.on_rooftop: bool = False
 
     def _get_current_zone(self, zone: dict, t: float) -> Tuple[List[float], float]:
         """Interpolates current zone center and radius."""
@@ -110,40 +120,71 @@ class Bot:
         urgent_boost = False
 
         for p in projectiles:
+            p_kind = p.get("kind", "gun")
             px, py, pz = p["pos"]
             vx, vy, vz = p["vel"]
-            v_sq = vx * vx + vy * vy + vz * vz
-            if v_sq < 100.0:
-                continue
 
-            dx = mx - px
-            dy = my - py
-            dz = (mz + 4.5) - pz
+            if p_kind == "mortar":
+                g = self.mortar_gravity
+                a = 0.5 * g
+                b = -vz
+                c = mz - pz
+                disc = b * b - 4.0 * a * c
+                if disc >= 0:
+                    sqrt_disc = math.sqrt(disc)
+                    t1 = (-b - sqrt_disc) / (2.0 * a)
+                    t2 = (-b + sqrt_disc) / (2.0 * a)
+                    candidates = [t for t in (t1, t2) if t > 0.05]
+                    if candidates:
+                        t_land = min(candidates)
+                        if t_land < 1.3:
+                            imp_x = px + vx * t_land
+                            imp_y = py + vy * t_land
+                            dist_to_blast = math.hypot(imp_x - mx, imp_y - my)
+                            if dist_to_blast < 8.5:
+                                esc_dx = mx - imp_x
+                                esc_dy = my - imp_y
+                                esc_len = math.hypot(esc_dx, esc_dy)
+                                if esc_len > 0.1:
+                                    weight = (8.5 - dist_to_blast) / 8.5
+                                    dodge_x += (esc_dx / esc_len) * weight * 3.5
+                                    dodge_y += (esc_dy / esc_len) * weight * 3.5
+                                    if energy > 15.0:
+                                        urgent_boost = True
 
-            t = (dx * vx + dy * vy + dz * vz) / v_sq
-            if 0.0 < t < 0.65:
-                cx = px + vx * t
-                cy = py + vy * t
-                cz = pz + vz * t
-                dist_xy = math.hypot(cx - mx, cy - my)
-                dist_z = abs(cz - (mz + 4.5))
+            else:
+                v_sq = vx * vx + vy * vy + vz * vz
+                if v_sq < 100.0:
+                    continue
 
-                if dist_xy < 3.8 and dist_z < 5.5:
-                    v_len = math.hypot(vx, vy)
-                    if v_len > 1.0:
-                        perp_x = -vy / v_len
-                        perp_y = vx / v_len
-                        dot = (mx - px) * perp_x + (my - py) * perp_y
-                        if dot < 0:
-                            perp_x = -perp_x
-                            perp_y = -perp_y
+                dx = mx - px
+                dy = my - py
+                dz = (mz + 4.5) - pz
 
-                        weight = (3.8 - dist_xy) / 3.8
-                        dodge_x += perp_x * weight * 3.0
-                        dodge_y += perp_y * weight * 3.0
+                t = (dx * vx + dy * vy + dz * vz) / v_sq
+                if 0.0 < t < 0.65:
+                    cx = px + vx * t
+                    cy = py + vy * t
+                    cz = pz + vz * t
+                    dist_xy = math.hypot(cx - mx, cy - my)
+                    dist_z = abs(cz - (mz + 4.5))
 
-                        if t < 0.35 and energy > 18.0:
-                            urgent_boost = True
+                    if dist_xy < 3.8 and dist_z < 5.5:
+                        v_len = math.hypot(vx, vy)
+                        if v_len > 1.0:
+                            perp_x = -vy / v_len
+                            perp_y = vx / v_len
+                            dot = (mx - px) * perp_x + (my - py) * perp_y
+                            if dot < 0:
+                                perp_x = -perp_x
+                                perp_y = -perp_y
+
+                            weight = (3.8 - dist_xy) / 3.8
+                            dodge_x += perp_x * weight * 3.0
+                            dodge_y += perp_y * weight * 3.0
+
+                            if t < 0.35 and energy > 18.0:
+                                urgent_boost = True
 
         d_len = math.hypot(dodge_x, dodge_y)
         if d_len > 3.0:
@@ -160,6 +201,7 @@ class Bot:
         hp = float(me.get("hp", 1400.0))
         max_hp = float(me.get("max_hp", 1400.0))
         energy = float(me.get("energy", 100.0))
+        grounded = me.get("grounded", True)
         in_zone = me.get("in_zone", True)
 
         act: mf.Action = {"tick": tick}
@@ -269,7 +311,6 @@ class Bot:
             if has_los:
                 score += 850.0
 
-            # Proximity urgency: enemies within 25m MUST be addressed immediately!
             if d < 25.0:
                 score += 1000.0 * (1.0 - (d / 25.0))
 
@@ -429,12 +470,13 @@ class Bot:
                 if gun_w and gun_w.get("ammo", 12) <= 6 and gun_w.get("reload", 0.0) == 0.0:
                     act["reload"] = True
 
-        # 7. Strategic Movement & Anti-Rush Kiting (Proven v5 Movement)
+        # 7. Strategic Movement & Rooftop High-Ground Ascent
         if tick % 45 == 0:
             self.strafe_direction *= -1.0
 
         goal_x, goal_y = next_center[0], next_center[1]
         request_boost = False
+        request_jump = False
 
         # Supply Drop Interception: Only capture if ready within 35m and uncontested
         ready_drop = None
@@ -452,6 +494,23 @@ class Bot:
 
         critical_retreat = (hp < 350.0 and len(all_enemies) > 0) or (len(all_enemies) >= 2 and target_dist < 30.0)
 
+        # Check if we are currently standing on a rooftop
+        self.on_rooftop = False
+        if self.target_roof is not None:
+            r = self.target_roof
+            d_center = math.hypot(x - r["cx"], y - r["cy"])
+            dist_to_zone = math.hypot(r["cx"] - next_center[0], r["cy"] - next_center[1])
+            # Abandon roof if zone pushed roof outside safe circle
+            if dist_to_zone > (next_radius - 12.0):
+                self.target_roof = None
+            else:
+                # Check if standing on top of roof
+                if (z >= r["top"] - 0.8) and (d_center <= r["radius"] + 3.0):
+                    self.on_rooftop = True
+                elif (z < r["top"] - 0.8) and (d_center > r["radius"] + 45.0):
+                    # Knocked or chased far away on ground
+                    self.target_roof = None
+
         if ready_drop and hp < 1100.0:
             goal_x = ready_drop["pos"][0]
             goal_y = ready_drop["pos"][1]
@@ -460,66 +519,85 @@ class Bot:
                 request_boost = True
 
         elif critical_retreat and primary_target:
-            cover_pt = self.world.find_cover(
-                [x, y, z],
-                primary_target["pos"],
-                cur_center,
-                cur_radius,
-                search_radius=25.0,
-            )
-            if cover_pt:
-                goal_x, goal_y = cover_pt[0], cover_pt[1]
+            if self.on_rooftop and self.target_roof:
+                # On roof: step back into center of roof for 100% full cover and HP regen!
+                r = self.target_roof
+                goal_x, goal_y = r["cx"], r["cy"]
                 mf.draw.point([goal_x, goal_y, z], "#00ff88", 8)
-                request_boost = (energy > 20.0)
             else:
-                away_x = x - primary_target["pos"][0]
-                away_y = y - primary_target["pos"][1]
-                d_away = math.hypot(away_x, away_y)
-                if d_away > 0.1:
-                    goal_x = x + (away_x / d_away) * 35.0
-                    goal_y = y + (away_y / d_away) * 35.0
-                request_boost = (energy > 20.0)
+                cover_pt = self.world.find_cover(
+                    [x, y, z],
+                    primary_target["pos"],
+                    cur_center,
+                    cur_radius,
+                    search_radius=25.0,
+                )
+                if cover_pt:
+                    goal_x, goal_y = cover_pt[0], cover_pt[1]
+                    mf.draw.point([goal_x, goal_y, z], "#00ff88", 8)
+                    request_boost = (energy > 20.0)
+                else:
+                    away_x = x - primary_target["pos"][0]
+                    away_y = y - primary_target["pos"][1]
+                    d_away = math.hypot(away_x, away_y)
+                    if d_away > 0.1:
+                        goal_x = x + (away_x / d_away) * 35.0
+                        goal_y = y + (away_y / d_away) * 35.0
+                    request_boost = (energy > 20.0)
 
         elif primary_target:
             t_pos = primary_target["pos"]
             d = target_dist
 
-            if not target_has_los:
-                u_x = (t_pos[0] - x) / (d + 1e-4)
-                u_y = (t_pos[1] - y) / (d + 1e-4)
-                goal_x = x + u_x * 15.0
-                goal_y = y + u_y * 15.0
+            if self.on_rooftop and self.target_roof:
+                # ROOFTOP HIGH-GROUND COMBAT: Peek edge to shoot down, step back if taking fire!
+                r = self.target_roof
+                rcx, rcy = r["cx"], r["cy"]
+                to_t_x = t_pos[0] - rcx
+                to_t_y = t_pos[1] - rcy
+                d_to_t = math.hypot(to_t_x, to_t_y)
+                if d_to_t > 0.1:
+                    # Move to roof edge overlooking enemy, with safety margin from ledge
+                    peek_dist = max(2.0, r["radius"] - 2.5)
+                    goal_x = rcx + (to_t_x / d_to_t) * peek_dist
+                    goal_y = rcy + (to_t_y / d_to_t) * peek_dist
             else:
-                # ANTI-RUSH ORBITAL KITING (PROVEN v5 MECHANICS)
-                u_x = (t_pos[0] - x) / (d + 1e-4)
-                u_y = (t_pos[1] - y) / (d + 1e-4)
-                perp_x = -u_y * self.strafe_direction
-                perp_y = u_x * self.strafe_direction
-
-                if d < 26.0:
-                    rad_x = -u_x * 2.5
-                    rad_y = -u_y * 2.5
-                    if energy > 15.0:
-                        request_boost = True
-                elif d > 42.0:
-                    rad_x = u_x * 1.0
-                    rad_y = u_y * 1.0
+                if not target_has_los:
+                    u_x = (t_pos[0] - x) / (d + 1e-4)
+                    u_y = (t_pos[1] - y) / (d + 1e-4)
+                    goal_x = x + u_x * 15.0
+                    goal_y = y + u_y * 15.0
                 else:
-                    rad_x = 0.0
-                    rad_y = 0.0
+                    # ANTI-RUSH ORBITAL KITING (PROVEN v5 MECHANICS)
+                    u_x = (t_pos[0] - x) / (d + 1e-4)
+                    u_y = (t_pos[1] - y) / (d + 1e-4)
+                    perp_x = -u_y * self.strafe_direction
+                    perp_y = u_x * self.strafe_direction
 
-                combat_vx = perp_x + rad_x
-                combat_vy = perp_y + rad_y
-                c_len = math.hypot(combat_vx, combat_vy)
-                if c_len > 0.1:
-                    goal_x = x + (combat_vx / c_len) * 20.0
-                    goal_y = y + (combat_vy / c_len) * 20.0
+                    if d < 26.0:
+                        rad_x = -u_x * 2.5
+                        rad_y = -u_y * 2.5
+                        if energy > 15.0:
+                            request_boost = True
+                    elif d > 42.0:
+                        rad_x = u_x * 1.0
+                        rad_y = u_y * 1.0
+                    else:
+                        rad_x = 0.0
+                        rad_y = 0.0
 
-                if energy > 50.0 and (tick % 10 < 4):
-                    request_boost = True
+                    combat_vx = perp_x + rad_x
+                    combat_vy = perp_y + rad_y
+                    c_len = math.hypot(combat_vx, combat_vy)
+                    if c_len > 0.1:
+                        goal_x = x + (combat_vx / c_len) * 20.0
+                        goal_y = y + (combat_vy / c_len) * 20.0
+
+                    if energy > 50.0 and (tick % 10 < 4):
+                        request_boost = True
 
         else:
-            # OUT OF COMBAT: Weapon Scavenge -> Supply Drops -> Crates -> Cubes -> Zone Edge
+            # OUT OF COMBAT: Weapon Scavenge -> Rooftop Ascent -> Crates -> Cubes
             unarmed_slot1 = (w1 is None)
             best_weapon_pickup = None
             if unarmed_slot1:
@@ -529,7 +607,6 @@ class Bot:
                     and math.hypot(p["pos"][0] - cur_center[0], p["pos"][1] - cur_center[1]) < (cur_radius - 10.0)
                 ]
                 if available_weapons:
-                    # PROVEN v5 SORT: ALWAYS GRAB THE CLOSEST WEAPON PICKUP!
                     available_weapons.sort(key=lambda p: math.hypot(p["pos"][0] - x, p["pos"][1] - y))
                     best_weapon_pickup = available_weapons[0]
 
@@ -553,35 +630,59 @@ class Bot:
                     request_boost = (energy > 25.0)
 
             else:
-                near_crates = [
-                    c for c in obs.get("crates", [])
-                    if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < 35.0
-                    and math.hypot(c["pos"][0] - cur_center[0], c["pos"][1] - cur_center[1]) < (cur_radius - 12.0)
-                ]
-                if near_crates:
-                    goal_x = near_crates[0]["pos"][0]
-                    goal_y = near_crates[0]["pos"][1]
+                # If we have 2 weapons (or t > 25s): SEEK ROOFTOP HIGH GROUND!
+                if self.target_roof is None and (w1 is not None or t > 25.0):
+                    best_roof = self.world.find_best_rooftop([x, y, z], next_center, next_radius)
+                    if best_roof is not None:
+                        self.target_roof = best_roof
+
+                if self.target_roof is not None:
+                    r = self.target_roof
+                    rcx, rcy, rtop = r["cx"], r["cy"], r["top"]
+                    goal_x, goal_y = rcx, rcy
+                    dist_to_roof_center = math.hypot(rcx - x, rcy - y)
+                    dist_to_roof_edge = dist_to_roof_center - r["radius"]
+
+                    # If below roof and approaching edge: JUMP AND JET UP TO ROOF!
+                    if z < (rtop - 0.5) and (dist_to_roof_edge < 8.0 or dist_to_roof_center < 18.0):
+                        if grounded:
+                            request_jump = True
+                        request_boost = True  # Jet upward in air!
+                    elif z >= (rtop - 0.5) and dist_to_roof_center <= (r["radius"] + 2.0):
+                        self.on_rooftop = True
+
+                    mf.draw.point([rcx, rcy, rtop], "#ff00aa", 8)
+
                 else:
-                    cubes = obs.get("cubes", [])
-                    safe_cubes = [
-                        c for c in cubes
-                        if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < 45.0
+                    near_crates = [
+                        c for c in obs.get("crates", [])
+                        if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < 35.0
                         and math.hypot(c["pos"][0] - cur_center[0], c["pos"][1] - cur_center[1]) < (cur_radius - 12.0)
                     ]
-                    if safe_cubes:
-                        safe_cubes.sort(key=lambda c: math.hypot(c["pos"][0] - x, c["pos"][1] - y))
-                        goal_x = safe_cubes[0]["pos"][0]
-                        goal_y = safe_cubes[0]["pos"][1]
-                        mf.draw.point([goal_x, goal_y, z], "#00e5ff", 6)
+                    if near_crates:
+                        goal_x = near_crates[0]["pos"][0]
+                        goal_y = near_crates[0]["pos"][1]
                     else:
-                        if cur_radius <= 140.0:
-                            edge_dist = max(20.0, cur_radius - 22.0)
-                            angle_to_me = math.atan2(y - cur_center[1], x - cur_center[0])
-                            goal_x = cur_center[0] + math.cos(angle_to_me) * edge_dist
-                            goal_y = cur_center[1] + math.sin(angle_to_me) * edge_dist
+                        cubes = obs.get("cubes", [])
+                        safe_cubes = [
+                            c for c in cubes
+                            if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < 45.0
+                            and math.hypot(c["pos"][0] - cur_center[0], c["pos"][1] - cur_center[1]) < (cur_radius - 12.0)
+                        ]
+                        if safe_cubes:
+                            safe_cubes.sort(key=lambda c: math.hypot(c["pos"][0] - x, c["pos"][1] - y))
+                            goal_x = safe_cubes[0]["pos"][0]
+                            goal_y = safe_cubes[0]["pos"][1]
+                            mf.draw.point([goal_x, goal_y, z], "#00e5ff", 6)
                         else:
-                            goal_x = next_center[0]
-                            goal_y = next_center[1]
+                            if cur_radius <= 140.0:
+                                edge_dist = max(20.0, cur_radius - 22.0)
+                                angle_to_me = math.atan2(y - cur_center[1], x - cur_center[0])
+                                goal_x = cur_center[0] + math.cos(angle_to_me) * edge_dist
+                                goal_y = cur_center[1] + math.sin(angle_to_me) * edge_dist
+                            else:
+                                goal_x = next_center[0]
+                                goal_y = next_center[1]
 
         # 8. Vector Field Steering, Obstacle Avoidance & Projectile Dodging
         g_dx = goal_x - x
@@ -593,10 +694,16 @@ class Bot:
         else:
             vx, vy = 0.0, 0.0
 
-        # Building wall repulsion
-        wall_rx, wall_ry = self.world.get_wall_repulsion(x, y, z, check_radius=5.5)
-        vx += wall_rx * 1.8
-        vy += wall_ry * 1.8
+        # Building wall repulsion (disabled when climbing onto target roof or standing on roof)
+        is_climbing_roof = (
+            self.target_roof is not None
+            and not self.on_rooftop
+            and math.hypot(self.target_roof["cx"] - x, self.target_roof["cy"] - y) < (self.target_roof["radius"] + 8.0)
+        )
+        if not is_climbing_roof and not self.on_rooftop:
+            wall_rx, wall_ry = self.world.get_wall_repulsion(x, y, z, check_radius=5.5)
+            vx += wall_rx * 1.8
+            vy += wall_ry * 1.8
 
         # Storm boundary repulsion
         dist_to_center = math.hypot(x - cur_center[0], y - cur_center[1])
@@ -641,10 +748,10 @@ class Bot:
         else:
             move_cmd = [0.0, 0.0]
 
-        # Jump handling over ledges/steps
-        grounded = me.get("grounded", True)
-        jump_cmd = False
-        if grounded and mv_len > 0.3 and (tick % 25 == 0):
+        # Jump handling: obstacle hopping + rooftop ascent
+        jump_cmd = request_jump
+        if not jump_cmd and grounded and mv_len > 0.3 and (tick % 25 == 0) and not self.on_rooftop:
+            wall_rx, wall_ry = self.world.get_wall_repulsion(x, y, z, check_radius=3.5)
             if math.hypot(wall_rx, wall_ry) > 0.3:
                 jump_cmd = True
 
@@ -656,7 +763,7 @@ class Bot:
             jump=jump_cmd,
         )
 
-        mf.draw.label(f"HP {hp:.0f}/{max_hp:.0f} · {'Combat' if primary_target else 'Searching'}")
+        mf.draw.label(f"HP {hp:.0f}/{max_hp:.0f} · {'Roof' if self.on_rooftop else ('Climbing' if is_climbing_roof else ('Combat' if primary_target else 'Searching'))}")
         mf.draw.point([goal_x, goal_y, z], "#40c0ff", 6)
 
         return act

@@ -111,8 +111,4 @@ def solve_mortar_aim(
 
 def normalize_angle(angle: float) -> float:
     """Wraps angle into [-pi, pi]."""
-    while angle > math.pi:
-        angle -= 2.0 * math.pi
-    while angle < -math.pi:
-        angle += 2.0 * math.pi
-    return angle
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi

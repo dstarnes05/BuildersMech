@@ -1,4 +1,4 @@
-"""World model: spatial indexing, collision geometry, line-of-sight and cover analysis."""
+"""World model: spatial indexing, collision geometry, line-of-sight, cover & rooftop analysis."""
 from __future__ import annotations
 
 import array
@@ -43,8 +43,48 @@ class WorldModel:
             "nx": 1070,
             "ny": 724,
         }
+        self.rooftops: List[dict] = []
         self._load_world()
         self._load_terrain()
+        self._index_rooftops()
+
+    def _index_rooftops(self) -> None:
+        """Precomputes high-value rooftop platforms for quick selection."""
+        self.rooftops = []
+        for p in self.prisms:
+            if p.get("kind") != "building":
+                continue
+            ring = p.get("ring", [])
+            n = len(ring) // 2
+            if n < 3:
+                continue
+
+            xs = [float(ring[2 * i]) for i in range(n)]
+            ys = [float(ring[2 * i + 1]) for i in range(n)]
+            cx = sum(xs) / n
+            cy = sum(ys) / n
+            top = float(p.get("top", 0.0))
+            gh = self.get_ground_height(cx, cy)
+            climb = top - gh
+
+            # Area calculation
+            area = 0.5 * abs(
+                sum(xs[i] * ys[i + 1] - xs[i + 1] * ys[i] for i in range(n - 1))
+                + xs[-1] * ys[0] - xs[0] * ys[-1]
+            )
+
+            # High-value rooftops: climbable height (2.5m to 14.0m) and sufficient deck area (>= 75 m^2)
+            if 2.5 <= climb <= 14.0 and area >= 75.0:
+                radius = math.sqrt(area / math.pi)
+                self.rooftops.append({
+                    "cx": cx,
+                    "cy": cy,
+                    "top": top,
+                    "climb": climb,
+                    "area": area,
+                    "radius": radius,
+                    "ring": ring,
+                })
 
     def _load_world(self) -> None:
         world_path = os.path.join(self.map_dir, "v2", "world.json")
@@ -147,9 +187,11 @@ class WorldModel:
                     sx1, sy1, sx2, sy2, base, top = seg
                     t = line_intersect_2d(p_line_start, p_line_end, (sx1, sy1), (sx2, sy2))
                     if t is not None:
-                        z_hit = z1 + t * (z2 - z1)
-                        if base <= z_hit <= top:
-                            return False
+                        # Ignore intersections extremely close to endpoints (own body / target cylinder)
+                        if 0.02 < t < 0.98:
+                            z_hit = z1 + t * (z2 - z1)
+                            if base <= z_hit <= top:
+                                return False
         return True
 
     def get_wall_repulsion(self, x: float, y: float, z: float, check_radius: float = 6.0) -> Tuple[float, float]:
@@ -199,7 +241,7 @@ class WorldModel:
         threat_pos: List[float],
         zone_center: List[float],
         zone_radius: float,
-        search_radius: float = 20.0,
+        search_radius: float = 25.0,
     ) -> Optional[Vec2]:
         """Finds a candidate 2D position within search_radius that breaks line-of-sight from threat_pos."""
         sx, sy, sz = self_pos[0], self_pos[1], self_pos[2]
@@ -208,10 +250,8 @@ class WorldModel:
         best_pt: Optional[Vec2] = None
         best_score = float("inf")
 
-        # Test candidate positions in radial pattern
         angles = [i * (math.pi / 6) for i in range(12)]
-        distances = [6.0, 12.0, 18.0]
-
+        distances = [8.0, 15.0, 22.0]
         threat_eye = [tx, ty, tz + 4.5]
 
         for d in distances:
@@ -219,20 +259,16 @@ class WorldModel:
                 cx = sx + math.cos(ang) * d
                 cy = sy + math.sin(ang) * d
 
-                # Must be inside safe zone
-                if math.hypot(cx - zone_center[0], cy - zone_center[1]) > zone_radius - 5.0:
+                if math.hypot(cx - zone_center[0], cy - zone_center[1]) > zone_radius - 6.0:
                     continue
 
-                # Ground clearance check: not inside wall
                 cz = self.get_ground_height(cx, cy)
                 rx, ry = self.get_wall_repulsion(cx, cy, cz, check_radius=3.0)
                 if math.hypot(rx, ry) > 2.0:
                     continue
 
                 candidate_eye = [cx, cy, cz + 4.5]
-                # If threat cannot see this candidate point:
                 if not self.has_los(threat_eye, candidate_eye):
-                    # Score based on distance from current pos and distance to zone center
                     dist_self = d
                     dist_zone = math.hypot(cx - zone_center[0], cy - zone_center[1])
                     score = dist_self + dist_zone * 0.3
@@ -241,3 +277,28 @@ class WorldModel:
                         best_pt = (cx, cy)
 
         return best_pt
+
+    def find_best_rooftop(
+        self,
+        self_pos: List[float],
+        zone_center: List[float],
+        zone_radius: float,
+    ) -> Optional[dict]:
+        """Finds the closest precomputed flat rooftop platform inside the safe zone."""
+        best: Optional[dict] = None
+        best_dist = float("inf")
+        sx, sy = self_pos[0], self_pos[1]
+
+        for r in self.rooftops:
+            cx, cy = r["cx"], r["cy"]
+            # Must be comfortably inside the safe zone with safety buffer
+            dist_to_zone = math.hypot(cx - zone_center[0], cy - zone_center[1])
+            if dist_to_zone > (zone_radius - max(15.0, r["radius"] + 5.0)):
+                continue
+
+            d_self = math.hypot(cx - sx, cy - sy)
+            if d_self < best_dist:
+                best_dist = d_self
+                best = r
+
+        return best
